@@ -12,7 +12,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-REQUEST_TIMEOUT = 16
+REQUEST_TIMEOUT = 5
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -115,7 +115,7 @@ def request_get(url: str, *, accept: str | None = None, timeout: int | float = R
 
 def fred_points(series_id: str, days: int = 21) -> list[tuple[datetime, float]]:
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={quote(series_id)}"
-    text = request_get(url, accept="text/csv", timeout=22).text
+    text = request_get(url, accept="text/csv", timeout=8).text
     rows = pd.read_csv(StringIO(text))
     points: list[tuple[datetime, float]] = []
     for _, row in rows.tail(days * 2).iterrows():
@@ -131,7 +131,7 @@ def fred_points(series_id: str, days: int = 21) -> list[tuple[datetime, float]]:
 
 def yahoo_quote(symbol: str) -> tuple[float, float, datetime | None, str]:
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol, safe='')}?interval=1m&range=1d&includePrePost=true"
-    payload = request_get(url).json()
+    payload = request_get(url, timeout=5).json()
     result = (payload.get("chart") or {}).get("result") or []
     if not result:
         raise RuntimeError(f"Yahoo missing {symbol}")
@@ -150,7 +150,7 @@ def yahoo_quote(symbol: str) -> tuple[float, float, datetime | None, str]:
 
 def stooq_quote(symbol: str) -> tuple[float, float, datetime | None, str]:
     url = f"https://stooq.com/q/d/l/?s={quote(symbol)}&i=d"
-    text = request_get(url, accept="text/csv", timeout=22).text
+    text = request_get(url, accept="text/csv", timeout=8).text
     rows = pd.read_csv(StringIO(text)).dropna(subset=["Close"])
     if rows.empty:
         raise RuntimeError(f"Stooq missing {symbol}")
@@ -178,7 +178,7 @@ def cboe_vx(position: int) -> tuple[float, float, datetime | None, str]:
         day = (datetime.now(timezone.utc) - pd.Timedelta(days=day_offset)).strftime("%Y-%m-%d")
         url = f"https://ww2.cboe.com/us/futures/market_statistics/settlement/csv?dt={day}"
         try:
-            text = request_get(url, accept="text/csv").text
+            text = request_get(url, accept="text/csv", timeout=4).text
             rows = pd.read_csv(StringIO(text))
             values = rows.loc[rows.get("Product") == "VX", "Price"].map(clean_number).dropna().tolist()
             if len(values) >= position:
@@ -264,7 +264,7 @@ def load_quotes() -> dict[str, Quote]:
     }
 
     quotes: dict[str, Quote] = {}
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=18) as executor:
         futures = {executor.submit(loader): instrument for instrument, loader in loaders.items()}
         for future in as_completed(futures):
             instrument = futures[future]
