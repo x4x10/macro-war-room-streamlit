@@ -164,6 +164,26 @@ def stooq_quote(symbol: str) -> tuple[float, float, datetime | None, str]:
     return value, prev, None if pd.isna(ts) else ts.to_pydatetime(), "Stooq public"
 
 
+def nasdaq_quote(
+    symbol: str,
+    asset_class: str,
+    source: str,
+    transform: Callable[[float], float] | None = None,
+) -> tuple[float, float, datetime | None, str]:
+    url = f"https://api.nasdaq.com/api/quote/{quote(symbol)}/info?assetclass={quote(asset_class)}"
+    payload = request_get(url, accept="application/json", timeout=8).json()
+    primary = ((payload.get("data") or {}).get("primaryData") or {})
+    raw_value = clean_number(primary.get("lastSalePrice"))
+    raw_change = clean_number(primary.get("netChange"))
+    if raw_value is None:
+        raise RuntimeError(f"Nasdaq price missing {symbol}")
+    raw_previous = raw_value - raw_change if raw_change is not None else raw_value
+    value = transform(raw_value) if transform else raw_value
+    previous = transform(raw_previous) if transform else raw_previous
+    ts = pd.to_datetime(primary.get("lastTradeTimestamp"), utc=True, errors="coerce")
+    return value, previous, None if pd.isna(ts) else ts.to_pydatetime(), source
+
+
 def coinbase_quote(product: str = "BTC-USD") -> tuple[float, float, datetime | None, str]:
     payload = request_get(f"https://api.exchange.coinbase.com/products/{product}/ticker").json()
     value = clean_number(payload.get("price") or payload.get("ask") or payload.get("bid"))
