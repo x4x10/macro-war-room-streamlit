@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from io import StringIO
 from typing import Any, Callable
 from urllib.parse import quote
+import xml.etree.ElementTree as ET
 
 import pandas as pd
 import requests
@@ -210,6 +211,60 @@ def cboe_vx(position: int) -> tuple[float, float, datetime | None, str]:
     raise RuntimeError(f"Cboe VX{position} missing")
 
 
+def cboe_vix_quote() -> tuple[float, float, datetime | None, str]:
+    url = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
+    text = request_get(url, accept="text/csv", timeout=8).text
+    rows = pd.read_csv(StringIO(text)).dropna(subset=["CLOSE"])
+    if rows.empty:
+        raise RuntimeError("CBOE VIX history missing")
+    latest = rows.iloc[-1]
+    previous = rows.iloc[-2] if len(rows) > 1 else latest
+    value = clean_number(latest.get("CLOSE"))
+    prev = clean_number(previous.get("CLOSE"))
+    if value is None or prev is None:
+        raise RuntimeError("CBOE VIX price missing")
+    ts = pd.to_datetime(latest.get("DATE"), utc=True, errors="coerce")
+    return value, prev, None if pd.isna(ts) else ts.to_pydatetime(), "CBOE VIX history"
+
+
+def treasury_curve() -> tuple[float, float, datetime | None, str]:
+    year = datetime.now(timezone.utc).year
+    url = f"https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve&field_tdr_date_value={year}"
+    text = request_get(url, accept="application/xml,text/xml", timeout=10).text
+    root = ET.fromstring(text)
+    ns = {
+        "atom": "http://www.w3.org/2005/Atom",
+        "m": "http://schemas.microsoft.com/ado/2007/08/dataservices/metadata",
+        "d": "http://schemas.microsoft.com/ado/2007/08/dataservices",
+    }
+    latest: tuple[datetime, float, float] | None = None
+    for props in root.findall(".//m:properties", ns):
+        date_text = props.findtext("d:NEW_DATE", default="", namespaces=ns)
+        ten = clean_number(props.findtext("d:BC_10YEAR", default="", namespaces=ns))
+        two = clean_number(props.findtext("d:BC_2YEAR", default="", namespaces=ns))
+        ts = pd.to_datetime(date_text, utc=True, errors="coerce")
+        if ten is None or two is None or pd.isna(ts):
+            continue
+        candidate = (ts.to_pydatetime(), ten, two)
+        if latest is None or candidate[0] > latest[0]:
+            latest = candidate
+    if latest is None:
+        raise RuntimeError("Treasury yield curve missing")
+    ts, ten, two = latest
+    return ten, two, ts, "US Treasury yield curve"
+
+
+def treasury_us10y() -> tuple[float, float, datetime | None, str]:
+    ten, _two, ts, source = treasury_curve()
+    return ten, ten, ts, source
+
+
+def treasury_t10y2y() -> tuple[float, float, datetime | None, str]:
+    ten, two, ts, source = treasury_curve()
+    spread = ten - two
+    return spread, spread, ts, source
+
+
 def fred_quote(instrument: str, series_id: str, label: str, transform: Callable[[float], float] | None = None) -> Quote:
     meta = INSTRUMENTS[instrument]
     try:
@@ -263,19 +318,19 @@ def quote_with_fallback(
 
 def load_quotes() -> dict[str, Quote]:
     loaders: dict[str, Callable[[], Quote]] = {
-        "CL1!": lambda: fred_quote("CL1!", "DCOILWTICO", "FRED WTI spot"),
-        "USOIL": lambda: fred_quote("USOIL", "DCOILWTICO", "FRED WTI spot"),
-        "UKOIL": lambda: fred_quote("UKOIL", "DCOILBRENTEU", "FRED Brent spot"),
-        "US10Y": lambda: fred_quote("US10Y", "DGS10", "FRED DGS10"),
+        "CL1!": lambda: quote_with_fallback("CL1!", [("Nasdaq USO proxy", lambda: nasdaq_quote("USO", "etf", "Nasdaq USO x0.55 WTI proxy", transform=lambda value: value * 0.55)), ("FRED WTI", lambda: fred_latest("DCOILWTICO", "FRED WTI spot"))]),
+        "USOIL": lambda: quote_with_fallback("USOIL", [("Nasdaq USO proxy", lambda: nasdaq_quote("USO", "etf", "Nasdaq USO x0.55 WTI proxy", transform=lambda value: value * 0.55)), ("FRED WTI", lambda: fred_latest("DCOILWTICO", "FRED WTI spot"))]),
+        "UKOIL": lambda: quote_with_fallback("UKOIL", [("Nasdaq BNO proxy", lambda: nasdaq_quote("BNO", "etf", "Nasdaq BNO x1.55 Brent proxy", transform=lambda value: value * 1.55)), ("FRED Brent", lambda: fred_latest("DCOILBRENTEU", "FRED Brent spot"))]),
+        "US10Y": lambda: quote_with_fallback("US10Y", [("US Treasury", treasury_us10y), ("FRED DGS10", lambda: fred_latest("DGS10", "FRED DGS10"))]),
         "MOVE": lambda: quote_with_fallback("MOVE", [("Yahoo MOVE", lambda: yahoo_quote("^MOVE"))]),
-        "VIX": lambda: fred_quote("VIX", "VIXCLS", "FRED VIX close"),
+        "VIX": lambda: quote_with_fallback("VIX", [("CBOE VIX", cboe_vix_quote), ("FRED VIX", lambda: fred_latest("VIXCLS", "FRED VIX close"))]),
         "VX1!": lambda: quote_with_fallback("VX1!", [("Cboe VX1", lambda: cboe_vx(1))]),
         "VX2!": lambda: quote_with_fallback("VX2!", [("Cboe VX2", lambda: cboe_vx(2))]),
         "HYG": lambda: quote_with_fallback("HYG", [("Nasdaq HYG", lambda: nasdaq_quote("HYG", "etf", "Nasdaq public HYG")), ("Yahoo HYG", lambda: yahoo_quote("HYG"))]),
         "BAMLH0A0HYM2": lambda: fred_quote("BAMLH0A0HYM2", "BAMLH0A0HYM2", "FRED HY OAS"),
-        "DXY": lambda: fred_quote("DXY", "DTWEXBGS", "FRED broad dollar proxy"),
-        "T10Y2Y": lambda: fred_quote("T10Y2Y", "T10Y2Y", "FRED 10Y2Y"),
-        "SPX": lambda: fred_quote("SPX", "SP500", "FRED SP500"),
+        "DXY": lambda: quote_with_fallback("DXY", [("Nasdaq UUP proxy", lambda: nasdaq_quote("UUP", "etf", "Nasdaq UUP x3.75 dollar proxy", transform=lambda value: value * 3.75)), ("FRED dollar proxy", lambda: fred_latest("DTWEXBGS", "FRED broad dollar proxy"))]),
+        "T10Y2Y": lambda: quote_with_fallback("T10Y2Y", [("US Treasury", treasury_t10y2y), ("FRED T10Y2Y", lambda: fred_latest("T10Y2Y", "FRED 10Y2Y"))]),
+        "SPX": lambda: quote_with_fallback("SPX", [("Nasdaq SPY proxy", lambda: nasdaq_quote("SPY", "etf", "Nasdaq SPY x10 SPX proxy", transform=lambda value: value * 10)), ("FRED SP500", lambda: fred_latest("SP500", "FRED SP500"))]),
         "NDX": lambda: quote_with_fallback("NDX", [("Nasdaq NDX", lambda: nasdaq_quote("NDX", "index", "Nasdaq public NDX")), ("Yahoo NDX", lambda: yahoo_quote("^NDX"))]),
         "GC1!": lambda: quote_with_fallback("GC1!", [("Nasdaq GLD", lambda: nasdaq_quote("GLD", "etf", "Nasdaq public GLD x10", transform=lambda value: value * 10)), ("FRED Gold", lambda: fred_latest("GOLDAMGBD228NLBM", "FRED gold spot"))]),
         "GOLD": lambda: quote_with_fallback("GOLD", [("Nasdaq GLD", lambda: nasdaq_quote("GLD", "etf", "Nasdaq public GLD x10", transform=lambda value: value * 10)), ("FRED Gold", lambda: fred_latest("GOLDAMGBD228NLBM", "FRED gold spot"))]),
