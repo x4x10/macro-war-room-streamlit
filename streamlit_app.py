@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import StringIO
@@ -12,7 +12,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-REQUEST_TIMEOUT = 12
+REQUEST_TIMEOUT = 6
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -116,7 +116,8 @@ def request_get(url: str, *, accept: str | None = None) -> requests.Response:
 @st.cache_data(ttl=120, show_spinner=False)
 def fred_points(series_id: str, days: int = 21) -> list[tuple[datetime, float]]:
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={quote(series_id)}"
-    rows = pd.read_csv(url)
+    text = request_get(url, accept="text/csv").text
+    rows = pd.read_csv(StringIO(text))
     points: list[tuple[datetime, float]] = []
     for _, row in rows.tail(days * 2).iterrows():
         value = clean_number(row.get(series_id))
@@ -247,27 +248,51 @@ def quote_with_fallback(
 
 @st.cache_data(ttl=75, show_spinner="Loading direct live public data...")
 def load_quotes() -> dict[str, Quote]:
+    loaders: dict[str, Callable[[], Quote]] = {
+        "CL1!": lambda: quote_with_fallback("CL1!", [("Yahoo CL", lambda: yahoo_quote("CL=F")), ("FRED WTI", lambda: fred_latest("DCOILWTICO", "FRED WTI spot"))]),
+        "USOIL": lambda: fred_quote("USOIL", "DCOILWTICO", "FRED WTI spot"),
+        "UKOIL": lambda: quote_with_fallback("UKOIL", [("Yahoo Brent", lambda: yahoo_quote("BZ=F")), ("FRED Brent", lambda: fred_latest("DCOILBRENTEU", "FRED Brent spot"))]),
+        "US10Y": lambda: fred_quote("US10Y", "DGS10", "FRED DGS10"),
+        "MOVE": lambda: quote_with_fallback("MOVE", [("Yahoo MOVE", lambda: yahoo_quote("^MOVE"))]),
+        "VIX": lambda: quote_with_fallback("VIX", [("Yahoo VIX", lambda: yahoo_quote("^VIX")), ("FRED VIX", lambda: fred_latest("VIXCLS", "FRED VIX close"))]),
+        "VX1!": lambda: quote_with_fallback("VX1!", [("Cboe VX1", lambda: cboe_vx(1))]),
+        "VX2!": lambda: quote_with_fallback("VX2!", [("Cboe VX2", lambda: cboe_vx(2))]),
+        "HYG": lambda: quote_with_fallback("HYG", [("Yahoo HYG", lambda: yahoo_quote("HYG")), ("Stooq HYG", lambda: stooq_quote("hyg.us"))]),
+        "BAMLH0A0HYM2": lambda: fred_quote("BAMLH0A0HYM2", "BAMLH0A0HYM2", "FRED HY OAS"),
+        "DXY": lambda: quote_with_fallback("DXY", [("Yahoo DXY", lambda: yahoo_quote("DX-Y.NYB")), ("FRED dollar proxy", lambda: fred_latest("DTWEXBGS", "FRED broad dollar proxy"))]),
+        "T10Y2Y": lambda: fred_quote("T10Y2Y", "T10Y2Y", "FRED 10Y2Y"),
+        "SPX": lambda: quote_with_fallback("SPX", [("Yahoo SPX", lambda: yahoo_quote("^GSPC")), ("FRED SP500", lambda: fred_latest("SP500", "FRED SP500"))]),
+        "NDX": lambda: quote_with_fallback("NDX", [("Yahoo NDX", lambda: yahoo_quote("^NDX")), ("Stooq NASDAQ100", lambda: stooq_quote("ndx"))]),
+        "GC1!": lambda: quote_with_fallback("GC1!", [("Yahoo Gold", lambda: yahoo_quote("GC=F")), ("FRED Gold", lambda: fred_latest("GOLDAMGBD228NLBM", "FRED gold spot"))]),
+        "GOLD": lambda: fred_quote("GOLD", "GOLDAMGBD228NLBM", "FRED gold spot"),
+        "BTCUSDT": lambda: quote_with_fallback("BTCUSDT", [("Coinbase BTC", lambda: coinbase_quote("BTC-USD")), ("Yahoo BTC", lambda: yahoo_quote("BTC-USD"))]),
+    }
+
     quotes: dict[str, Quote] = {}
-    quotes["CL1!"] = quote_with_fallback("CL1!", [("Yahoo CL", lambda: yahoo_quote("CL=F")), ("FRED WTI", lambda: fred_latest("DCOILWTICO", "FRED WTI spot"))])
-    quotes["USOIL"] = fred_quote("USOIL", "DCOILWTICO", "FRED WTI spot")
-    quotes["UKOIL"] = quote_with_fallback("UKOIL", [("Yahoo Brent", lambda: yahoo_quote("BZ=F")), ("FRED Brent", lambda: fred_latest("DCOILBRENTEU", "FRED Brent spot"))])
-    quotes["US10Y"] = fred_quote("US10Y", "DGS10", "FRED DGS10")
-    us10y = quotes["US10Y"]
-    quotes["TNX"] = Quote("TNX", INSTRUMENTS["TNX"]["label"], None if us10y.value is None else us10y.value * 10, None if us10y.previous is None else us10y.previous * 10, us10y.timestamp, "FRED DGS10 x10", INSTRUMENTS["TNX"]["role"], "verifier", us10y.validity, us10y.error)
-    quotes["MOVE"] = quote_with_fallback("MOVE", [("Yahoo MOVE", lambda: yahoo_quote("^MOVE"))])
-    quotes["VIX"] = quote_with_fallback("VIX", [("Yahoo VIX", lambda: yahoo_quote("^VIX")), ("FRED VIX", lambda: fred_latest("VIXCLS", "FRED VIX close"))])
-    quotes["VX1!"] = quote_with_fallback("VX1!", [("Cboe VX1", lambda: cboe_vx(1))])
-    quotes["VX2!"] = quote_with_fallback("VX2!", [("Cboe VX2", lambda: cboe_vx(2))])
-    quotes["HYG"] = quote_with_fallback("HYG", [("Yahoo HYG", lambda: yahoo_quote("HYG")), ("Stooq HYG", lambda: stooq_quote("hyg.us"))])
-    quotes["BAMLH0A0HYM2"] = fred_quote("BAMLH0A0HYM2", "BAMLH0A0HYM2", "FRED HY OAS")
-    quotes["DXY"] = quote_with_fallback("DXY", [("Yahoo DXY", lambda: yahoo_quote("DX-Y.NYB")), ("FRED dollar proxy", lambda: fred_latest("DTWEXBGS", "FRED broad dollar proxy"))])
-    quotes["T10Y2Y"] = fred_quote("T10Y2Y", "T10Y2Y", "FRED 10Y2Y")
-    quotes["SPX"] = quote_with_fallback("SPX", [("Yahoo SPX", lambda: yahoo_quote("^GSPC")), ("FRED SP500", lambda: fred_latest("SP500", "FRED SP500"))])
-    quotes["NDX"] = quote_with_fallback("NDX", [("Yahoo NDX", lambda: yahoo_quote("^NDX")), ("Stooq NASDAQ100", lambda: stooq_quote("ndx"))])
-    quotes["GC1!"] = quote_with_fallback("GC1!", [("Yahoo Gold", lambda: yahoo_quote("GC=F")), ("FRED Gold", lambda: fred_latest("GOLDAMGBD228NLBM", "FRED gold spot"))])
-    quotes["GOLD"] = fred_quote("GOLD", "GOLDAMGBD228NLBM", "FRED gold spot")
-    quotes["BTCUSDT"] = quote_with_fallback("BTCUSDT", [("Coinbase BTC", lambda: coinbase_quote("BTC-USD")), ("Yahoo BTC", lambda: yahoo_quote("BTC-USD"))])
-    return quotes
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(loader): instrument for instrument, loader in loaders.items()}
+        for future in as_completed(futures):
+            instrument = futures[future]
+            try:
+                quotes[instrument] = future.result()
+            except Exception as exc:
+                quotes[instrument] = unavailable(instrument, "direct public sources", exc)
+
+    us10y = quotes.get("US10Y")
+    quotes["TNX"] = Quote(
+        "TNX",
+        INSTRUMENTS["TNX"]["label"],
+        None if us10y is None or us10y.value is None else us10y.value * 10,
+        None if us10y is None or us10y.previous is None else us10y.previous * 10,
+        None if us10y is None else us10y.timestamp,
+        "FRED DGS10 x10",
+        INSTRUMENTS["TNX"]["role"],
+        "verifier",
+        "invalid" if us10y is None else us10y.validity,
+        "" if us10y is not None else "US10Y unavailable",
+    )
+
+    return {instrument: quotes.get(instrument) or unavailable(instrument, "direct public sources", "not loaded") for instrument in INSTRUMENTS}
 
 
 def fred_latest(series_id: str, source: str) -> tuple[float, float, datetime | None, str]:
