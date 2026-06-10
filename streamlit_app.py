@@ -261,7 +261,6 @@ def quote_with_fallback(
     return unavailable(instrument, " / ".join(source for source, _ in loaders), "; ".join(errors))
 
 
-@st.cache_data(ttl=75, show_spinner="Loading direct live public data...")
 def load_quotes() -> dict[str, Quote]:
     loaders: dict[str, Callable[[], Quote]] = {
         "CL1!": lambda: fred_quote("CL1!", "DCOILWTICO", "FRED WTI spot"),
