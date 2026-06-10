@@ -12,7 +12,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-REQUEST_TIMEOUT = 6
+REQUEST_TIMEOUT = 16
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -104,18 +104,18 @@ def clean_number(value: Any) -> float | None:
         return None
 
 
-def request_get(url: str, *, accept: str | None = None) -> requests.Response:
+def request_get(url: str, *, accept: str | None = None, timeout: int | float = REQUEST_TIMEOUT) -> requests.Response:
     headers = dict(HEADERS)
     if accept:
         headers["Accept"] = accept
-    response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+    response = requests.get(url, headers=headers, timeout=timeout)
     response.raise_for_status()
     return response
 
 
 def fred_points(series_id: str, days: int = 21) -> list[tuple[datetime, float]]:
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={quote(series_id)}"
-    text = request_get(url, accept="text/csv").text
+    text = request_get(url, accept="text/csv", timeout=22).text
     rows = pd.read_csv(StringIO(text))
     points: list[tuple[datetime, float]] = []
     for _, row in rows.tail(days * 2).iterrows():
@@ -150,7 +150,7 @@ def yahoo_quote(symbol: str) -> tuple[float, float, datetime | None, str]:
 
 def stooq_quote(symbol: str) -> tuple[float, float, datetime | None, str]:
     url = f"https://stooq.com/q/d/l/?s={quote(symbol)}&i=d"
-    text = request_get(url, accept="text/csv").text
+    text = request_get(url, accept="text/csv", timeout=22).text
     rows = pd.read_csv(StringIO(text)).dropna(subset=["Close"])
     if rows.empty:
         raise RuntimeError(f"Stooq missing {symbol}")
@@ -244,27 +244,27 @@ def quote_with_fallback(
 @st.cache_data(ttl=75, show_spinner="Loading direct live public data...")
 def load_quotes() -> dict[str, Quote]:
     loaders: dict[str, Callable[[], Quote]] = {
-        "CL1!": lambda: quote_with_fallback("CL1!", [("Yahoo CL", lambda: yahoo_quote("CL=F")), ("FRED WTI", lambda: fred_latest("DCOILWTICO", "FRED WTI spot"))]),
+        "CL1!": lambda: fred_quote("CL1!", "DCOILWTICO", "FRED WTI spot"),
         "USOIL": lambda: fred_quote("USOIL", "DCOILWTICO", "FRED WTI spot"),
-        "UKOIL": lambda: quote_with_fallback("UKOIL", [("Yahoo Brent", lambda: yahoo_quote("BZ=F")), ("FRED Brent", lambda: fred_latest("DCOILBRENTEU", "FRED Brent spot"))]),
+        "UKOIL": lambda: fred_quote("UKOIL", "DCOILBRENTEU", "FRED Brent spot"),
         "US10Y": lambda: fred_quote("US10Y", "DGS10", "FRED DGS10"),
         "MOVE": lambda: quote_with_fallback("MOVE", [("Yahoo MOVE", lambda: yahoo_quote("^MOVE"))]),
-        "VIX": lambda: quote_with_fallback("VIX", [("Yahoo VIX", lambda: yahoo_quote("^VIX")), ("FRED VIX", lambda: fred_latest("VIXCLS", "FRED VIX close"))]),
+        "VIX": lambda: fred_quote("VIX", "VIXCLS", "FRED VIX close"),
         "VX1!": lambda: quote_with_fallback("VX1!", [("Cboe VX1", lambda: cboe_vx(1))]),
         "VX2!": lambda: quote_with_fallback("VX2!", [("Cboe VX2", lambda: cboe_vx(2))]),
-        "HYG": lambda: quote_with_fallback("HYG", [("Yahoo HYG", lambda: yahoo_quote("HYG")), ("Stooq HYG", lambda: stooq_quote("hyg.us"))]),
+        "HYG": lambda: quote_with_fallback("HYG", [("Nasdaq HYG", lambda: nasdaq_quote("HYG", "etf", "Nasdaq public HYG")), ("Yahoo HYG", lambda: yahoo_quote("HYG"))]),
         "BAMLH0A0HYM2": lambda: fred_quote("BAMLH0A0HYM2", "BAMLH0A0HYM2", "FRED HY OAS"),
-        "DXY": lambda: quote_with_fallback("DXY", [("Yahoo DXY", lambda: yahoo_quote("DX-Y.NYB")), ("FRED dollar proxy", lambda: fred_latest("DTWEXBGS", "FRED broad dollar proxy"))]),
+        "DXY": lambda: fred_quote("DXY", "DTWEXBGS", "FRED broad dollar proxy"),
         "T10Y2Y": lambda: fred_quote("T10Y2Y", "T10Y2Y", "FRED 10Y2Y"),
-        "SPX": lambda: quote_with_fallback("SPX", [("Yahoo SPX", lambda: yahoo_quote("^GSPC")), ("FRED SP500", lambda: fred_latest("SP500", "FRED SP500"))]),
-        "NDX": lambda: quote_with_fallback("NDX", [("Yahoo NDX", lambda: yahoo_quote("^NDX")), ("Stooq NASDAQ100", lambda: stooq_quote("ndx"))]),
-        "GC1!": lambda: quote_with_fallback("GC1!", [("Yahoo Gold", lambda: yahoo_quote("GC=F")), ("FRED Gold", lambda: fred_latest("GOLDAMGBD228NLBM", "FRED gold spot"))]),
-        "GOLD": lambda: fred_quote("GOLD", "GOLDAMGBD228NLBM", "FRED gold spot"),
+        "SPX": lambda: fred_quote("SPX", "SP500", "FRED SP500"),
+        "NDX": lambda: quote_with_fallback("NDX", [("Nasdaq NDX", lambda: nasdaq_quote("NDX", "index", "Nasdaq public NDX")), ("Yahoo NDX", lambda: yahoo_quote("^NDX"))]),
+        "GC1!": lambda: quote_with_fallback("GC1!", [("Nasdaq GLD", lambda: nasdaq_quote("GLD", "etf", "Nasdaq public GLD x10", transform=lambda value: value * 10)), ("FRED Gold", lambda: fred_latest("GOLDAMGBD228NLBM", "FRED gold spot"))]),
+        "GOLD": lambda: quote_with_fallback("GOLD", [("Nasdaq GLD", lambda: nasdaq_quote("GLD", "etf", "Nasdaq public GLD x10", transform=lambda value: value * 10)), ("FRED Gold", lambda: fred_latest("GOLDAMGBD228NLBM", "FRED gold spot"))]),
         "BTCUSDT": lambda: quote_with_fallback("BTCUSDT", [("Coinbase BTC", lambda: coinbase_quote("BTC-USD")), ("Yahoo BTC", lambda: yahoo_quote("BTC-USD"))]),
     }
 
     quotes: dict[str, Quote] = {}
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(loader): instrument for instrument, loader in loaders.items()}
         for future in as_completed(futures):
             instrument = futures[future]
