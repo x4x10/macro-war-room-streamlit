@@ -591,6 +591,12 @@ unavailable_rows = [
 ]
 if unavailable_rows:
     st.subheader("Unavailable live sources")
+    st.code(
+        "\n".join(
+            f"{row['instrument']}: {row['source attempted']} -> {row['error'][:500]}"
+            for row in unavailable_rows
+        )
+    )
     st.dataframe(pd.DataFrame(unavailable_rows), use_container_width=True, hide_index=True)
 
 st.caption("This Streamlit deployment intentionally uses no mock data. If a public provider blocks or delays a symbol, that symbol is marked unavailable instead of fabricated.")
