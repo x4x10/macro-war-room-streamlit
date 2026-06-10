@@ -113,7 +113,6 @@ def request_get(url: str, *, accept: str | None = None) -> requests.Response:
     return response
 
 
-@st.cache_data(ttl=120, show_spinner=False)
 def fred_points(series_id: str, days: int = 21) -> list[tuple[datetime, float]]:
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={quote(series_id)}"
     text = request_get(url, accept="text/csv").text
@@ -130,7 +129,6 @@ def fred_points(series_id: str, days: int = 21) -> list[tuple[datetime, float]]:
     return points
 
 
-@st.cache_data(ttl=90, show_spinner=False)
 def yahoo_quote(symbol: str) -> tuple[float, float, datetime | None, str]:
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol, safe='')}?interval=1m&range=1d&includePrePost=true"
     payload = request_get(url).json()
@@ -150,7 +148,6 @@ def yahoo_quote(symbol: str) -> tuple[float, float, datetime | None, str]:
     return value, previous, ts, "Yahoo public"
 
 
-@st.cache_data(ttl=600, show_spinner=False)
 def stooq_quote(symbol: str) -> tuple[float, float, datetime | None, str]:
     url = f"https://stooq.com/q/d/l/?s={quote(symbol)}&i=d"
     text = request_get(url, accept="text/csv").text
@@ -167,7 +164,6 @@ def stooq_quote(symbol: str) -> tuple[float, float, datetime | None, str]:
     return value, prev, None if pd.isna(ts) else ts.to_pydatetime(), "Stooq public"
 
 
-@st.cache_data(ttl=60, show_spinner=False)
 def coinbase_quote(product: str = "BTC-USD") -> tuple[float, float, datetime | None, str]:
     payload = request_get(f"https://api.exchange.coinbase.com/products/{product}/ticker").json()
     value = clean_number(payload.get("price") or payload.get("ask") or payload.get("bid"))
@@ -177,7 +173,6 @@ def coinbase_quote(product: str = "BTC-USD") -> tuple[float, float, datetime | N
     return value, value, None if pd.isna(ts) else ts.to_pydatetime(), "Coinbase public"
 
 
-@st.cache_data(ttl=900, show_spinner=False)
 def cboe_vx(position: int) -> tuple[float, float, datetime | None, str]:
     for day_offset in range(0, 8):
         day = (datetime.now(timezone.utc) - pd.Timedelta(days=day_offset)).strftime("%Y-%m-%d")
